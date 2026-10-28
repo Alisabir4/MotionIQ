@@ -72,8 +72,38 @@ st.markdown(
         border-right: 1px solid #29343A;
     }
 
-    [data-testid="stSidebar"] * {
-        color: var(--white);
+    /* Sidebar: readable text and controls on the dark background */
+    [data-testid="stSidebar"] {
+        background: #101519 !important;
+        color: #F4F7F2 !important;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] .stCaption,
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] {
+        color: #F4F7F2 !important;
+    }
+
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] textarea {
+        color: #F4F7F2 !important;
+        background-color: #141B1C !important;
+    }
+
+    [data-testid="stSidebar"] [data-baseweb="select"] > div,
+    [data-testid="stSidebar"] [data-testid="stSelectSlider"],
+    [data-testid="stSidebar"] [data-testid="stSlider"] {
+        color: #F4F7F2 !important;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stRadio"] label,
+    [data-testid="stSidebar"] [data-testid="stFileUploader"] label {
+        color: #F4F7F2 !important;
     }
 
     .block-container {
@@ -349,7 +379,7 @@ class SquatCounter:
 # DRAW POSE OVERLAY
 # =========================================================
 
-def draw_overlay(frame, landmarks, counter):
+def draw_overlay(frame, landmarks, counter, update_counter=True):
     height, width = frame.shape[:2]
 
     for point_a, point_b in POSE_CONNECTIONS:
@@ -392,7 +422,11 @@ def draw_overlay(frame, landmarks, counter):
         landmarks, width, height
     )
 
-    counter.update(angle)
+    # Update rep-counting state only on inference frames. On frames between
+    # inference calls, reuse the latest landmarks for a smoother preview
+    # without counting the same pose multiple times.
+    if update_counter:
+        counter.update(angle)
 
     # Dark information panel
     cv2.rectangle(
@@ -573,6 +607,17 @@ video_col, metrics_col = st.columns(
 
 with video_col:
     st.markdown("#### Video analysis")
+
+    # Always show the selected source video as a normal browser video player.
+    # The annotated preview below updates during AI processing.
+    if video_source is not None:
+        st.markdown("##### Original video")
+        if isinstance(video_source, str):
+            st.video(video_source)
+        else:
+            st.video(video_source.getvalue())
+
+    st.markdown("##### Pose analysis preview")
     preview = st.empty()
     progress_bar = st.progress(0)
     progress_text = st.empty()
@@ -647,7 +692,7 @@ if start_button:
 
         last_timestamp_ms = -1
         last_angle = None
-        last_display_frame = None
+        last_landmarks = None
 
         start_time = time.perf_counter()
 
@@ -722,33 +767,45 @@ if start_button:
 
                     if result.pose_landmarks:
                         detected_frames += 1
-
-                        last_angle = draw_overlay(
-                            frame,
-                            result.pose_landmarks[0],
-                            counter,
+                        last_landmarks = result.pose_landmarks[0]
+                        last_angle, _ = get_knee_angle(
+                            last_landmarks,
+                            frame.shape[1],
+                            frame.shape[0],
                         )
+                        counter.update(last_angle)
 
                         if last_angle is not None:
                             angle_sum += last_angle
                             angle_count += 1
 
                     else:
+                        last_landmarks = None
                         last_angle = None
                         counter.update(None)
 
-                        cv2.putText(
-                            frame,
-                            "NO PERSON DETECTED",
-                            (18, 35),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
-                            (80, 80, 255),
-                            2,
-                            cv2.LINE_AA,
-                        )
-
-                    last_display_frame = frame.copy()
+                # Draw the most recent pose on the current frame, including
+                # frames where inference is skipped. This keeps the preview
+                # moving and avoids updating the squat counter more than once
+                # for the same inference result.
+                if last_landmarks is not None:
+                    draw_overlay(
+                        frame,
+                        last_landmarks,
+                        counter,
+                        update_counter=False,
+                    )
+                else:
+                    cv2.putText(
+                        frame,
+                        "NO PERSON DETECTED",
+                        (18, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (80, 80, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
 
                 should_update_ui = (
                     current_index % preview_every == 0
@@ -758,10 +815,7 @@ if start_button:
                     )
                 )
 
-                if (
-                    should_update_ui
-                    and last_display_frame is not None
-                ):
+                if should_update_ui:
                     elapsed = (
                         time.perf_counter() - start_time
                     )
@@ -774,7 +828,7 @@ if start_button:
 
                     preview.image(
                         cv2.cvtColor(
-                            last_display_frame,
+                            frame,
                             cv2.COLOR_BGR2RGB,
                         ),
                         channels="RGB",
